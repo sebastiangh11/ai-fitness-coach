@@ -1,0 +1,21 @@
+This is a Next.js (App Router) + TypeScript project.
+
+Global Engineering Rules:
+
+- Use strict TypeScript.
+- Never use "any" unless absolutely unavoidable.
+- Follow Next.js App Router conventions.
+- Use route handlers (app/api/...) instead of legacy pages/api.
+- Keep business logic inside /lib.
+- API routes must be thin wrappers only.
+- All AI/LLM responses must be validated with Zod schemas.
+- Always return structured JSON from LLM calls.
+- No UI logic inside API routes.
+- Prefer small modular files over large ones.
+- Use clear typing for all DB models.
+- Code must compile before finishing.
+- Avoid overengineering.
+- Keep MVP simple and deployable.
+- Do not generate unnecessary example/demo components.
+- Do not hallucinate external APIs.
+- Add TODO comments instead of fake implementations.
