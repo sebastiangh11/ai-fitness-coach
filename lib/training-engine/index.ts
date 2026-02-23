@@ -14,3 +14,6 @@ export type { MissEvent, MissReason, AdjustOptions, AdjustResult } from "./adjus
 // ── Evaluation ─────────────────────────────────────────────────────────────
 export { summarizeAdherence, mapCompletedByDate } from "./evaluators/adherence";
 export type { AdherenceSummary } from "./evaluators/adherence";
+
+// ── Store Contract ──────────────────────────────────────────────────────────
+export type { TrainingStateStore, WeekPlanSnapshot, WeekKey } from "./runtime/store";
