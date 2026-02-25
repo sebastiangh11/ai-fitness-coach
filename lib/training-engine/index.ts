@@ -21,3 +21,6 @@ export type { TrainingStateStore, WeekPlanSnapshot, WeekKey } from "./runtime/st
 // ── Runtime ─────────────────────────────────────────────────────────────────
 export { createTrainingRuntime } from "./runtime/runtime";
 export type { RuntimeOptions } from "./runtime/runtime";
+
+// ── In-Memory Store ──────────────────────────────────────────────────────────
+export { InMemoryStore, createInMemoryStore } from "./runtime/inMemoryStore";

@@ -28,11 +28,7 @@ export interface WeekPlanSnapshot {
 
 /**
  * Storage contract that every persistence backend must implement.
- *
- * Implementations may be synchronous (in-memory) or asynchronous (DB) –
- * the interface is intentionally synchronous here so the in-memory adapter
- * remains a drop-in; async adapters can wrap with async/await at the call site
- * once a real backend is introduced.
+ * All methods are async to accommodate both in-memory and remote backends.
  *
  * Rules:
  *  - No `any` types.
@@ -45,39 +41,39 @@ export interface TrainingStateStore {
    * Persist a freshly generated week for the first time.
    * Throws if a snapshot for `snapshot.weekStartISO` already exists.
    */
-  initWeek(snapshot: WeekPlanSnapshot): void;
+  initWeek(snapshot: WeekPlanSnapshot): Promise<void>;
 
   /**
    * Return the stored snapshot for a week, or `undefined` if not found.
    */
-  getWeekPlan(weekStartISO: string): WeekPlanSnapshot | undefined;
+  getWeekPlan(weekStartISO: string): Promise<WeekPlanSnapshot | undefined>;
 
   /**
    * Overwrite the snapshot for an existing week (e.g. after an adjustment).
    * Implementations should update `updatedAt`.
    */
-  saveWeekPlan(snapshot: WeekPlanSnapshot): void;
+  saveWeekPlan(snapshot: WeekPlanSnapshot): Promise<void>;
 
   /**
    * Append a completed session record to the given week's log.
    */
-  logCompletedSession(weekStartISO: string, session: CompletedSession): void;
+  logCompletedSession(weekStartISO: string, session: CompletedSession): Promise<void>;
 
   /**
    * Record that a day was missed.
    * @param reason  Optional free-text reason surfaced to the athlete.
    */
-  markMissed(weekStartISO: string, dateISO: string, reason?: string): void;
+  markMissed(weekStartISO: string, dateISO: string, reason?: string): Promise<void>;
 
   /**
    * Return all completed sessions recorded for the given week.
    * Returns an empty array when the week is not found.
    */
-  getCompletedSessions(weekStartISO: string): CompletedSession[];
+  getCompletedSessions(weekStartISO: string): Promise<CompletedSession[]>;
 
   /**
    * Return the decision log entries for the given week.
    * Returns an empty array when the week is not found.
    */
-  getDecisionLog(weekStartISO: string): DecisionLog[];
+  getDecisionLog(weekStartISO: string): Promise<DecisionLog[]>;
 }

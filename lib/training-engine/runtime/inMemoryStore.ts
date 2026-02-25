@@ -1,140 +1,101 @@
-import type { PlanContext, PlanDay, CompletedSession, DecisionLog } from "../types";
-import { generateWeek } from "../generators/planGenerator";
-import { adjustAfterMiss, type MissEvent, type MissReason } from "../adjusters/missAdjuster";
-import { computeLoad } from "../load";
-import { summarizeAdherence } from "../evaluators/adherence";
-import { isISODateOnly } from "../utils/dates";
+import type { CompletedSession, DecisionLog, PlanDay } from "../types";
+import type { TrainingStateStore, WeekKey, WeekPlanSnapshot } from "./store";
 
-// ==============================
-// State Shape
-// ==============================
+// ── InMemoryStore ─────────────────────────────────────────────────────────────
+//
+// Pure storage adapter. No engine calls. Implements TrainingStateStore using
+// three Maps keyed by weekStartISO (WeekKey).
+//
+// Defensive cloning is applied on every read and write so callers cannot
+// accidentally mutate internal state.
 
-export interface EngineState {
-  weekStartISO: string | null;
-  plan: PlanDay[];
-  completed: CompletedSession[];
-  context: PlanContext | null;
-}
+export class InMemoryStore implements TrainingStateStore {
+  private readonly weekSnapshots = new Map<WeekKey, WeekPlanSnapshot>();
+  private readonly completedByWeek = new Map<WeekKey, CompletedSession[]>();
+  private readonly decisionLogByWeek = new Map<WeekKey, DecisionLog[]>();
 
-const state: EngineState = {
-  weekStartISO: null,
-  plan: [],
-  completed: [],
-  context: null,
-};
+  // ── TrainingStateStore ───────────────────────────────────────────────────
 
-// ==============================
-// Guards
-// ==============================
+  async initWeek(snapshot: WeekPlanSnapshot): Promise<void> {
+    const key = snapshot.weekStartISO;
+    if (this.weekSnapshots.has(key)) {
+      throw new Error(
+        `initWeek: a plan already exists for "${key}". ` +
+          `Use saveWeekPlan to update an existing week.`,
+      );
+    }
+    this.weekSnapshots.set(key, cloneSnapshot(snapshot));
+    this.decisionLogByWeek.set(key, [...snapshot.decisionLog]);
+    if (!this.completedByWeek.has(key)) {
+      this.completedByWeek.set(key, []);
+    }
+  }
 
-function requireISO(iso: string, label: string): void {
-  if (!isISODateOnly(iso)) {
-    throw new Error(`${label}: "${iso}" is not a valid ISO date-only string (YYYY-MM-DD).`);
+  async getWeekPlan(weekStartISO: string): Promise<WeekPlanSnapshot | undefined> {
+    const snap = this.weekSnapshots.get(weekStartISO);
+    return snap === undefined ? undefined : cloneSnapshot(snap);
+  }
+
+  async saveWeekPlan(snapshot: WeekPlanSnapshot): Promise<void> {
+    const key = snapshot.weekStartISO;
+    this.weekSnapshots.set(key, cloneSnapshot(snapshot));
+    this.decisionLogByWeek.set(key, [...snapshot.decisionLog]);
+  }
+
+  async logCompletedSession(weekStartISO: string, session: CompletedSession): Promise<void> {
+    const list = this.completedByWeek.get(weekStartISO) ?? [];
+    list.push({ ...session });
+    this.completedByWeek.set(weekStartISO, list);
+  }
+
+  /**
+   * Records that a day was missed by updating planDays in the stored snapshot.
+   * Does NOT call any engine logic — that is the runtime's responsibility.
+   * The runtime overwrites this with the engine-adjusted plan via saveWeekPlan.
+   */
+  async markMissed(weekStartISO: string, dateISO: string, _reason?: string): Promise<void> {
+    const snap = this.weekSnapshots.get(weekStartISO);
+    if (snap === undefined) return;
+
+    const updatedDays: PlanDay[] = snap.planDays.map((day) => {
+      if (day.date !== dateISO) return day;
+      // Leave already-terminal days alone.
+      if (day.status === "missed" || day.status === "completed") return day;
+      return { ...day, status: "missed" as const };
+    });
+
+    this.weekSnapshots.set(weekStartISO, {
+      ...snap,
+      planDays: updatedDays,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  async getCompletedSessions(weekStartISO: string): Promise<CompletedSession[]> {
+    return [...(this.completedByWeek.get(weekStartISO) ?? [])];
+  }
+
+  async getDecisionLog(weekStartISO: string): Promise<DecisionLog[]> {
+    return [...(this.decisionLogByWeek.get(weekStartISO) ?? [])];
   }
 }
 
-function requireInitialized(): PlanContext {
-  if (state.context === null) {
-    throw new Error(
-      "Training engine not initialized. Call initWeek(context, weekStartISO) first."
-    );
-  }
-  return state.context;
+// ── Factory ───────────────────────────────────────────────────────────────────
+
+export function createInMemoryStore(): InMemoryStore {
+  return new InMemoryStore();
 }
 
-function clonePlan(plan: PlanDay[]): PlanDay[] {
-  return plan.map((day) => ({
-    ...day,
-    primary: day.primary ? { ...day.primary } : undefined,
-    secondary: day.secondary ? { ...day.secondary } : undefined,
-  }));
-}
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
-// ==============================
-// Public API
-// ==============================
-
-export function initWeek(context: PlanContext, weekStartISO: string): EngineState {
-  requireISO(weekStartISO, "initWeek");
-  const result = generateWeek(context, weekStartISO);
-  state.weekStartISO = weekStartISO;
-  state.plan = result.plan;
-  state.completed = [];
-  state.context = context;
-  return getState();
-}
-
-export function getState(): EngineState {
+function cloneSnapshot(snap: WeekPlanSnapshot): WeekPlanSnapshot {
   return {
-    weekStartISO: state.weekStartISO,
-    plan: clonePlan(state.plan),
-    completed: [...state.completed],
-    context: state.context,
+    ...snap,
+    planDays: snap.planDays.map((day) => ({
+      ...day,
+      primary: day.primary !== undefined ? { ...day.primary } : undefined,
+      secondary: day.secondary !== undefined ? { ...day.secondary } : undefined,
+    })),
+    decisionLog: [...snap.decisionLog],
   };
-}
-
-export function getWeekPlan(): PlanDay[] {
-  return clonePlan(state.plan);
-}
-
-export function logCompletedSession(input: {
-  dateISO: string;
-  type: CompletedSession["type"];
-  durationMinutes: number;
-  rpe: number;
-  notes?: string;
-}): CompletedSession {
-  requireInitialized();
-  requireISO(input.dateISO, "logCompletedSession");
-
-  const load = computeLoad(input.durationMinutes, input.rpe);
-  const session: CompletedSession = {
-    id: `${input.dateISO}-${input.type}-${input.durationMinutes}-${input.rpe}`,
-    date: input.dateISO,
-    type: input.type,
-    durationMinutes: input.durationMinutes,
-    rpe: input.rpe,
-    load,
-    ...(input.notes !== undefined ? { notes: input.notes } : {}),
-  };
-
-  state.completed.push(session);
-
-  // Mark matching plan day as completed (status only; leave session content intact)
-  const dayIdx = state.plan.findIndex((d) => d.date === input.dateISO);
-  if (dayIdx !== -1 && state.plan[dayIdx].status === "planned") {
-    state.plan[dayIdx] = { ...state.plan[dayIdx], status: "completed" };
-  }
-
-  return session;
-}
-
-export function markMissed(
-  dateISO: string,
-  reason?: MissReason,
-  notes?: string
-): { plan: PlanDay[]; decisionLog: DecisionLog[] } {
-  const context = requireInitialized();
-  requireISO(dateISO, "markMissed");
-
-  const event: MissEvent = {
-    dateISO,
-    kind: "missed",
-    ...(reason !== undefined ? { reason } : {}),
-    ...(notes !== undefined ? { notes } : {}),
-  };
-
-  const result = adjustAfterMiss(context, state.plan, event, {
-    horizonDays: 2,
-    allowRebalance: false,
-  });
-
-  state.plan = result.plan;
-
-  return { plan: clonePlan(state.plan), decisionLog: result.decisionLog };
-}
-
-export function getAdherenceSummary() {
-  requireInitialized();
-  return summarizeAdherence(state.plan, state.completed);
 }

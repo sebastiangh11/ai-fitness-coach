@@ -46,7 +46,7 @@ export function createTrainingRuntime(
 
   // ── A ────────────────────────────────────────────────────────────────────
 
-  function initWeek(context: PlanContext, weekStartISO: string): WeekPlanSnapshot {
+  async function initWeek(context: PlanContext, weekStartISO: string): Promise<WeekPlanSnapshot> {
     const result = generateWeek(context, weekStartISO);
     const ts = new Date().toISOString();
 
@@ -60,30 +60,30 @@ export function createTrainingRuntime(
       engineVersion,
     };
 
-    store.initWeek(snapshot);
+    await store.initWeek(snapshot);
     return snapshot;
   }
 
   // ── B ────────────────────────────────────────────────────────────────────
 
-  function getWeekPlan(weekStartISO: string): WeekPlanSnapshot | undefined {
+  async function getWeekPlan(weekStartISO: string): Promise<WeekPlanSnapshot | undefined> {
     return store.getWeekPlan(weekStartISO);
   }
 
   // ── C ────────────────────────────────────────────────────────────────────
 
-  function logCompletedSession(weekStartISO: string, session: CompletedSession): void {
-    store.logCompletedSession(weekStartISO, session);
+  async function logCompletedSession(weekStartISO: string, session: CompletedSession): Promise<void> {
+    await store.logCompletedSession(weekStartISO, session);
   }
 
   // ── D ────────────────────────────────────────────────────────────────────
 
-  function markMissed(
+  async function markMissed(
     weekStartISO: string,
     dateISO: string,
     reason?: string,
-  ): WeekPlanSnapshot {
-    const snapshot = store.getWeekPlan(weekStartISO);
+  ): Promise<WeekPlanSnapshot> {
+    const snapshot = await store.getWeekPlan(weekStartISO);
     if (snapshot === undefined) {
       throw new Error(
         `markMissed: no week plan found for "${weekStartISO}". ` +
@@ -92,10 +92,10 @@ export function createTrainingRuntime(
     }
 
     // Persist the miss event in the store (audit trail / future queries).
-    store.markMissed(weekStartISO, dateISO, reason);
+    await store.markMissed(weekStartISO, dateISO, reason);
 
     // Fetch the latest completed sessions to keep context current.
-    const completedSessions = store.getCompletedSessions(weekStartISO);
+    const completedSessions = await store.getCompletedSessions(weekStartISO);
 
     // Run engine adjustment over the stored planDays.
     const missReason = toMissReason(reason);
@@ -128,17 +128,17 @@ export function createTrainingRuntime(
       updatedAt: new Date().toISOString(),
     };
 
-    store.saveWeekPlan(updatedSnapshot);
+    await store.saveWeekPlan(updatedSnapshot);
     return updatedSnapshot;
   }
 
   // ── E ────────────────────────────────────────────────────────────────────
 
-  function getAdherenceSummary(weekStartISO: string): AdherenceSummary | undefined {
-    const snapshot = store.getWeekPlan(weekStartISO);
+  async function getAdherenceSummary(weekStartISO: string): Promise<AdherenceSummary | undefined> {
+    const snapshot = await store.getWeekPlan(weekStartISO);
     if (snapshot === undefined) return undefined;
 
-    const completedSessions = store.getCompletedSessions(weekStartISO);
+    const completedSessions = await store.getCompletedSessions(weekStartISO);
     return summarizeAdherence(snapshot.planDays, completedSessions);
   }
 
