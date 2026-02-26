@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { getRuntime } from "../../../lib/server/trainingRuntime";
+import { requireAuth } from "../../../lib/server/requireAuth";
 
 export async function GET(request: Request): Promise<NextResponse> {
+  const auth = await requireAuth();
+  if (auth instanceof NextResponse) return auth;
+
   const { searchParams } = new URL(request.url);
   const weekStartISO = searchParams.get("weekStartISO");
 
@@ -13,7 +17,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const runtime = getRuntime();
+    const runtime = getRuntime(auth.supabase);
     const summary = await runtime.getAdherenceSummary(weekStartISO);
     if (summary === undefined) {
       return NextResponse.json(

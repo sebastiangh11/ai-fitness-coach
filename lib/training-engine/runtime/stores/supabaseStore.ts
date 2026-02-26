@@ -1,24 +1,9 @@
-// NOTE: TrainingStateStore methods are declared synchronous in the interface.
-// Supabase operations are inherently async. This class implements all methods
-// as async (returning Promises). Void-returning methods satisfy the interface
-// via TypeScript's void-return assignability. The three read methods
-// (getWeekPlan, getCompletedSessions, getDecisionLog) return Promises and will
-// require the TrainingStateStore interface to be updated to async for full
-// TypeScript strict compliance. The implementation itself is correct and complete.
-
 import type { CompletedSession, DecisionLog, PlanDay, PlanContext } from "../../types";
 import type { TrainingStateStore, WeekPlanSnapshot } from "../store";
-import { supabase } from "../../../db/supabaseClient";
-import type { PostgrestError } from "@supabase/supabase-js";
-
-const USER_KEY = "local" as const;
+import type { SupabaseClient, PostgrestError } from "@supabase/supabase-js";
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-/**
- * Strips the time component from any ISO string and returns YYYY-MM-DD.
- * Safe to call with a plain date string that has no time component.
- */
 function toISODateOnly(isoString: string): string {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(isoString);
   if (match === null || match[1] === undefined) {
@@ -27,65 +12,66 @@ function toISODateOnly(isoString: string): string {
   return match[1];
 }
 
-/**
- * Throws a descriptive error when a Supabase operation returns an error object.
- */
-function assertSupabaseOk(
-  error: PostgrestError | null,
-  context: string,
-): void {
+function assertSupabaseOk(error: PostgrestError | null, context: string): void {
   if (error !== null) {
-    throw new Error(
-      `SupabaseStore [${context}]: ${error.message} (code: ${error.code})`,
-    );
+    throw new Error(`SupabaseStore [${context}]: ${error.message} (code: ${error.code})`);
   }
-}
-
-/**
- * Fetches the UUID for an existing week row.
- * Throws a clear error if the week does not exist in the database.
- */
-async function getOrCreateWeekId(weekStartISO: string): Promise<string> {
-  const { data, error } = await supabase
-    .from("weeks")
-    .select("id")
-    .eq("user_key", USER_KEY)
-    .eq("week_start", toISODateOnly(weekStartISO))
-    .maybeSingle();
-
-  assertSupabaseOk(error, "getOrCreateWeekId");
-
-  if (data === null || data === undefined) {
-    throw new Error(
-      `SupabaseStore: no week found for "${weekStartISO}" ` +
-        `(user_key="${USER_KEY}"). Call initWeek first.`,
-    );
-  }
-
-  return data.id as string;
 }
 
 // ── SupabaseStore ─────────────────────────────────────────────────────────────
 
+/**
+ * Supabase-backed TrainingStateStore.
+ *
+ * Requires an authenticated SupabaseClient (from createSupabaseServerClient).
+ * RLS on the DB enforces per-user isolation; this class does NOT filter by
+ * user_id explicitly — policies apply transparently via auth.uid().
+ */
 export class SupabaseStore implements TrainingStateStore {
+  private readonly client: SupabaseClient;
+
+  constructor(client: SupabaseClient) {
+    this.client = client;
+  }
+
+  // ── private helpers ───────────────────────────────────────────────────────
+
+  private async getWeekId(weekStartISO: string): Promise<string> {
+    const { data, error } = await this.client
+      .from("weeks")
+      .select("id")
+      .eq("week_start", toISODateOnly(weekStartISO))
+      .maybeSingle();
+
+    assertSupabaseOk(error, "getWeekId");
+
+    if (data === null || data === undefined) {
+      throw new Error(
+        `SupabaseStore: no week found for "${weekStartISO}". Call initWeek first.`,
+      );
+    }
+
+    return data.id as string;
+  }
+
   // ── initWeek ─────────────────────────────────────────────────────────────
 
   async initWeek(snapshot: WeekPlanSnapshot): Promise<void> {
     const weekDate = toISODateOnly(snapshot.weekStartISO);
 
-    // 1. Upsert weeks row (unique on user_key, week_start).
-    const { data: weekRow, error: weekError } = await supabase
+    // user_id is set by DEFAULT auth.uid() on first insert;
+    // conflict target matches the (user_id, week_start) unique constraint added in 002_auth_rls.sql.
+    const { data: weekRow, error: weekError } = await this.client
       .from("weeks")
       .upsert(
         {
-          user_key: USER_KEY,
           week_start: weekDate,
           engine_version: snapshot.engineVersion,
           context_json: snapshot.context,
           created_at: snapshot.createdAt,
           updated_at: snapshot.updatedAt,
         },
-        { onConflict: "user_key,week_start" },
+        { onConflict: "user_id,week_start" },
       )
       .select("id")
       .single();
@@ -99,7 +85,6 @@ export class SupabaseStore implements TrainingStateStore {
 
     const weekId = weekRow.id as string;
 
-    // 2. Upsert plan_days — one row per calendar date.
     const planDaysRows = snapshot.planDays.map((day) => ({
       week_id: weekId,
       date: toISODateOnly(day.date),
@@ -107,14 +92,13 @@ export class SupabaseStore implements TrainingStateStore {
       payload: day,
     }));
 
-    const { error: daysError } = await supabase
+    const { error: daysError } = await this.client
       .from("plan_days")
       .upsert(planDaysRows, { onConflict: "week_id,date" });
 
     assertSupabaseOk(daysError, "initWeek/plan-days-upsert");
 
-    // 3. Append decision_logs row — source='generator'.
-    const { error: logError } = await supabase.from("decision_logs").insert({
+    const { error: logError } = await this.client.from("decision_logs").insert({
       week_id: weekId,
       source: "generator",
       entries: snapshot.decisionLog,
@@ -125,16 +109,12 @@ export class SupabaseStore implements TrainingStateStore {
 
   // ── getWeekPlan ───────────────────────────────────────────────────────────
 
-  async getWeekPlan(
-    weekStartISO: string,
-  ): Promise<WeekPlanSnapshot | undefined> {
+  async getWeekPlan(weekStartISO: string): Promise<WeekPlanSnapshot | undefined> {
     const weekDate = toISODateOnly(weekStartISO);
 
-    // 1. Fetch weeks row.
-    const { data: weekRow, error: weekError } = await supabase
+    const { data: weekRow, error: weekError } = await this.client
       .from("weeks")
       .select("id, engine_version, context_json, created_at, updated_at")
-      .eq("user_key", USER_KEY)
       .eq("week_start", weekDate)
       .maybeSingle();
 
@@ -143,8 +123,7 @@ export class SupabaseStore implements TrainingStateStore {
 
     const weekId = weekRow.id as string;
 
-    // 2. Fetch plan_days ordered by date.
-    const { data: planDaysRows, error: daysError } = await supabase
+    const { data: planDaysRows, error: daysError } = await this.client
       .from("plan_days")
       .select("payload")
       .eq("week_id", weekId)
@@ -152,8 +131,7 @@ export class SupabaseStore implements TrainingStateStore {
 
     assertSupabaseOk(daysError, "getWeekPlan/plan-days-select");
 
-    // 3. Fetch decision_logs ordered by created_at.
-    const { data: logRows, error: logError } = await supabase
+    const { data: logRows, error: logError } = await this.client
       .from("decision_logs")
       .select("entries")
       .eq("week_id", weekId)
@@ -162,9 +140,7 @@ export class SupabaseStore implements TrainingStateStore {
     assertSupabaseOk(logError, "getWeekPlan/decision-logs-select");
 
     const planDays = (planDaysRows ?? []).map((row) => row.payload as PlanDay);
-    const decisionLog = (logRows ?? []).flatMap(
-      (row) => row.entries as DecisionLog[],
-    );
+    const decisionLog = (logRows ?? []).flatMap((row) => row.entries as DecisionLog[]);
 
     return {
       weekStartISO,
@@ -182,15 +158,14 @@ export class SupabaseStore implements TrainingStateStore {
   async saveWeekPlan(snapshot: WeekPlanSnapshot): Promise<void> {
     const weekDate = toISODateOnly(snapshot.weekStartISO);
 
-    // 1. Update the weeks row — context, engine version, and updatedAt.
-    const { data: weekRow, error: weekError } = await supabase
+    // RLS scopes the UPDATE to the current user's rows automatically.
+    const { data: weekRow, error: weekError } = await this.client
       .from("weeks")
       .update({
         context_json: snapshot.context,
         engine_version: snapshot.engineVersion,
         updated_at: snapshot.updatedAt,
       })
-      .eq("user_key", USER_KEY)
       .eq("week_start", weekDate)
       .select("id")
       .single();
@@ -198,14 +173,12 @@ export class SupabaseStore implements TrainingStateStore {
     assertSupabaseOk(weekError, "saveWeekPlan/weeks-update");
     if (weekRow === null || weekRow === undefined) {
       throw new Error(
-        `SupabaseStore.saveWeekPlan: week not found for "${snapshot.weekStartISO}". ` +
-          `Call initWeek first.`,
+        `SupabaseStore.saveWeekPlan: week not found for "${snapshot.weekStartISO}". Call initWeek first.`,
       );
     }
 
     const weekId = weekRow.id as string;
 
-    // 2. Upsert plan_days rows.
     const planDaysRows = snapshot.planDays.map((day) => ({
       week_id: weekId,
       date: toISODateOnly(day.date),
@@ -213,14 +186,13 @@ export class SupabaseStore implements TrainingStateStore {
       payload: day,
     }));
 
-    const { error: daysError } = await supabase
+    const { error: daysError } = await this.client
       .from("plan_days")
       .upsert(planDaysRows, { onConflict: "week_id,date" });
 
     assertSupabaseOk(daysError, "saveWeekPlan/plan-days-upsert");
 
-    // 3. Append decision_logs row — source='runtime'.
-    const { error: logError } = await supabase.from("decision_logs").insert({
+    const { error: logError } = await this.client.from("decision_logs").insert({
       week_id: weekId,
       source: "runtime",
       entries: snapshot.decisionLog,
@@ -231,13 +203,10 @@ export class SupabaseStore implements TrainingStateStore {
 
   // ── logCompletedSession ───────────────────────────────────────────────────
 
-  async logCompletedSession(
-    weekStartISO: string,
-    session: CompletedSession,
-  ): Promise<void> {
-    const weekId = await getOrCreateWeekId(weekStartISO);
+  async logCompletedSession(weekStartISO: string, session: CompletedSession): Promise<void> {
+    const weekId = await this.getWeekId(weekStartISO);
 
-    const { error } = await supabase.from("completed_sessions").insert({
+    const { error } = await this.client.from("completed_sessions").insert({
       week_id: weekId,
       date: toISODateOnly(session.date),
       payload: session,
@@ -248,16 +217,11 @@ export class SupabaseStore implements TrainingStateStore {
 
   // ── markMissed ────────────────────────────────────────────────────────────
 
-  async markMissed(
-    weekStartISO: string,
-    dateISO: string,
-    reason?: string,
-  ): Promise<void> {
-    const weekId = await getOrCreateWeekId(weekStartISO);
+  async markMissed(weekStartISO: string, dateISO: string, reason?: string): Promise<void> {
+    const weekId = await this.getWeekId(weekStartISO);
     const date = toISODateOnly(dateISO);
 
-    // 1. Fetch the current plan_days row so we can update the payload.
-    const { data: dayRow, error: fetchError } = await supabase
+    const { data: dayRow, error: fetchError } = await this.client
       .from("plan_days")
       .select("payload")
       .eq("week_id", weekId)
@@ -267,23 +231,17 @@ export class SupabaseStore implements TrainingStateStore {
     assertSupabaseOk(fetchError, "markMissed/plan-days-select");
     if (dayRow === null || dayRow === undefined) {
       throw new Error(
-        `SupabaseStore.markMissed: no plan_day found for date "${dateISO}" ` +
-          `in week "${weekStartISO}"`,
+        `SupabaseStore.markMissed: no plan_day found for date "${dateISO}" in week "${weekStartISO}"`,
       );
     }
 
     const currentPayload = dayRow.payload as PlanDay;
-
-    // Leave already-terminal days unchanged; otherwise stamp status='missed'.
-    const isTerminal =
-      currentPayload.status === "missed" ||
-      currentPayload.status === "completed";
+    const isTerminal = currentPayload.status === "missed" || currentPayload.status === "completed";
     const updatedPayload: PlanDay = isTerminal
       ? currentPayload
       : { ...currentPayload, status: "missed" };
 
-    // 2. Update plan_days row.
-    const { error: updateError } = await supabase
+    const { error: updateError } = await this.client
       .from("plan_days")
       .update({ status: "missed", payload: updatedPayload })
       .eq("week_id", weekId)
@@ -291,7 +249,6 @@ export class SupabaseStore implements TrainingStateStore {
 
     assertSupabaseOk(updateError, "markMissed/plan-days-update");
 
-    // 3. Append decision_logs row — source='miss'.
     const logEntry: DecisionLog = {
       rule: "mark_missed",
       message:
@@ -301,7 +258,7 @@ export class SupabaseStore implements TrainingStateStore {
       severity: "info",
     };
 
-    const { error: logError } = await supabase.from("decision_logs").insert({
+    const { error: logError } = await this.client.from("decision_logs").insert({
       week_id: weekId,
       source: "miss",
       entries: [logEntry],
@@ -312,22 +269,19 @@ export class SupabaseStore implements TrainingStateStore {
 
   // ── getCompletedSessions ──────────────────────────────────────────────────
 
-  async getCompletedSessions(
-    weekStartISO: string,
-  ): Promise<CompletedSession[]> {
+  async getCompletedSessions(weekStartISO: string): Promise<CompletedSession[]> {
     const weekDate = toISODateOnly(weekStartISO);
 
-    const { data: weekRow, error: weekError } = await supabase
+    const { data: weekRow, error: weekError } = await this.client
       .from("weeks")
       .select("id")
-      .eq("user_key", USER_KEY)
       .eq("week_start", weekDate)
       .maybeSingle();
 
     assertSupabaseOk(weekError, "getCompletedSessions/weeks-select");
     if (weekRow === null || weekRow === undefined) return [];
 
-    const { data, error } = await supabase
+    const { data, error } = await this.client
       .from("completed_sessions")
       .select("payload")
       .eq("week_id", weekRow.id as string)
@@ -343,17 +297,16 @@ export class SupabaseStore implements TrainingStateStore {
   async getDecisionLog(weekStartISO: string): Promise<DecisionLog[]> {
     const weekDate = toISODateOnly(weekStartISO);
 
-    const { data: weekRow, error: weekError } = await supabase
+    const { data: weekRow, error: weekError } = await this.client
       .from("weeks")
       .select("id")
-      .eq("user_key", USER_KEY)
       .eq("week_start", weekDate)
       .maybeSingle();
 
     assertSupabaseOk(weekError, "getDecisionLog/weeks-select");
     if (weekRow === null || weekRow === undefined) return [];
 
-    const { data, error } = await supabase
+    const { data, error } = await this.client
       .from("decision_logs")
       .select("entries")
       .eq("week_id", weekRow.id as string)
