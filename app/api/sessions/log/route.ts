@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getRuntime } from "../../../../lib/server/trainingRuntime";
+import { requireAuth } from "../../../../lib/server/requireAuth";
+import { computeLoad } from "../../../../lib/training-engine/load";
 
 const bodySchema = z.object({
   weekStartISO: z.string().min(1),
   session: z.object({
-    id: z.string(),
+    id: z.string().optional(),
     date: z.string(),
     type: z.enum([
       "run",
@@ -16,9 +18,9 @@ const bodySchema = z.object({
       "mobility",
       "rest",
     ]),
-    durationMinutes: z.number(),
-    rpe: z.number(),
-    load: z.number(),
+    durationMinutes: z.number().optional(),
+    rpe: z.number().optional(),
+    load: z.number().optional(),
     notes: z.string().optional(),
   }),
 });
@@ -42,10 +44,51 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  const { weekStartISO, session } = parsed.data;
+  const { weekStartISO, session: raw } = parsed.data;
+
+  // Resolve load: use provided value, or compute from durationMinutes + rpe.
+  let load: number;
+  if (raw.load !== undefined) {
+    load = raw.load;
+  } else if (raw.durationMinutes !== undefined && raw.rpe !== undefined) {
+    load = computeLoad(raw.durationMinutes, raw.rpe);
+  } else {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          "Cannot compute load: provide either 'load' or both 'durationMinutes' and 'rpe'.",
+      },
+      { status: 400 },
+    );
+  }
+
+  // Both durationMinutes and rpe are required for a valid CompletedSession record.
+  if (raw.durationMinutes === undefined || raw.rpe === undefined) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Missing required fields: 'durationMinutes' and 'rpe'.",
+      },
+      { status: 400 },
+    );
+  }
+
+  const session = {
+    id: raw.id ?? crypto.randomUUID(),
+    date: raw.date,
+    type: raw.type,
+    durationMinutes: raw.durationMinutes,
+    rpe: raw.rpe,
+    load,
+    ...(raw.notes !== undefined ? { notes: raw.notes } : {}),
+  };
+
+  const auth = await requireAuth();
+  if (auth instanceof NextResponse) return auth;
 
   try {
-    const runtime = getRuntime();
+    const runtime = getRuntime(auth.supabase);
     await runtime.logCompletedSession(weekStartISO, session);
     return NextResponse.json({ ok: true });
   } catch (err) {

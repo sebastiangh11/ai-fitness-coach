@@ -1,12 +1,25 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getRuntime } from "../../../../lib/server/trainingRuntime";
+import { requireAuth } from "../../../../lib/server/requireAuth";
 
-const bodySchema = z.object({
-  weekStartISO: z.string().min(1),
-  dateISO: z.string().min(1),
-  reason: z.string().optional(),
-});
+// Accept `dateISO` (canonical) or `date` (alias used by other routes) — pick whichever is present.
+const bodySchema = z
+  .object({
+    weekStartISO: z.string().min(1),
+    dateISO: z.string().min(1).optional(),
+    date: z.string().min(1).optional(),
+    reason: z.string().optional(),
+  })
+  .refine((v) => v.dateISO !== undefined || v.date !== undefined, {
+    message: "dateISO (or date) is required",
+    path: ["dateISO"],
+  })
+  .transform((v) => ({
+    weekStartISO: v.weekStartISO,
+    dateISO: (v.dateISO ?? v.date) as string,
+    reason: v.reason,
+  }));
 
 export async function POST(request: Request): Promise<NextResponse> {
   let body: unknown;
@@ -29,8 +42,11 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const { weekStartISO, dateISO, reason } = parsed.data;
 
+  const auth = await requireAuth();
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const runtime = getRuntime();
+    const runtime = getRuntime(auth.supabase);
     const snapshot = await runtime.markMissed(weekStartISO, dateISO, reason);
     return NextResponse.json({
       ok: true,

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getRuntime } from "../../../../lib/server/trainingRuntime";
+import { requireAuth } from "../../../../lib/server/requireAuth";
 import type { PlanContext } from "../../../../lib/training-engine/types";
 
 // ── Leaf schemas ──────────────────────────────────────────────────────────────
@@ -147,8 +148,11 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   const { weekStartISO, context } = parsed.data;
 
+  const auth = await requireAuth();
+  if (auth instanceof NextResponse) return auth;
+
   try {
-    const runtime = getRuntime();
+    const runtime = getRuntime(auth.supabase);
     const snapshot = await runtime.initWeek(
       context as unknown as PlanContext,
       weekStartISO,
