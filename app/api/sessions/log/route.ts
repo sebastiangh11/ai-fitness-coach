@@ -90,6 +90,36 @@ export async function POST(request: Request): Promise<NextResponse> {
   try {
     const runtime = getRuntime(auth.supabase);
     await runtime.logCompletedSession(weekStartISO, session);
+
+    // Update the corresponding plan_day status to "completed".
+    // This is route-level persistence — no engine/store changes required.
+    const { data: weekRow } = await auth.supabase
+      .from("weeks")
+      .select("id")
+      .eq("week_start", weekStartISO)
+      .maybeSingle();
+
+    if (weekRow !== null && weekRow !== undefined) {
+      const { data: dayRow } = await auth.supabase
+        .from("plan_days")
+        .select("payload")
+        .eq("week_id", weekRow.id as string)
+        .eq("date", session.date)
+        .maybeSingle();
+
+      if (dayRow !== null && dayRow !== undefined) {
+        const updatedPayload = {
+          ...(dayRow.payload as Record<string, unknown>),
+          status: "completed",
+        };
+        await auth.supabase
+          .from("plan_days")
+          .update({ status: "completed", payload: updatedPayload })
+          .eq("week_id", weekRow.id as string)
+          .eq("date", session.date);
+      }
+    }
+
     return NextResponse.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Internal server error";

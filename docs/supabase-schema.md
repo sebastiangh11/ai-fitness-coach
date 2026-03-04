@@ -123,6 +123,24 @@ preserved chronologically rather than overwritten.
 
 ---
 
+### `user_settings`
+
+Stores per-user training preferences. One row per user; upserted on save.
+Introduced in `supabase/migrations/003_user_settings.sql`.
+
+| Column           | TypeScript source                   | Notes                                                  |
+|------------------|-------------------------------------|--------------------------------------------------------|
+| `user_id`        | —                                   | PK; references `auth.users`. Defaults to `auth.uid()`. |
+| `focus`          | `UserSettings.focus`                | Training goal: `'triathlon'`, `'hyrox'`, etc.          |
+| `weekly_minutes` | `UserSettings.weeklyMinutes`        | Total training time budget per week.                   |
+| `equipment`      | `UserSettings.equipment`            | JSON: `{ gym, trainer, pool, outdoorRun }` booleans.   |
+| `created_at`     | —                                   | Set once on first upsert.                              |
+| `updated_at`     | —                                   | Auto-updated by trigger on every UPDATE.               |
+
+API: `GET /api/settings` returns defaults if no row exists; `POST /api/settings` upserts.
+
+---
+
 ## `user_key` and multi-user extension
 
 All tables that need isolation carry `user_key` on the `weeks` row (child

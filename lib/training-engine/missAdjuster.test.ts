@@ -93,6 +93,14 @@ describe("adjustAfterMiss", () => {
     expect(day18?.primary).toBeDefined();
     expect(day18?.primary?.intensity).toBe("easy");
     expect(result.decisionLog.some((e) => e.severity === "warning")).toBe(true);
+
+    // Day+2 log entry should include previous→new duration and RPE
+    const day18Log = result.decisionLog.find(
+      (e) => e.rule === "miss_adjuster_injury" && e.message.includes("2026-02-18"),
+    );
+    expect(day18Log).toBeDefined();
+    expect(day18Log?.message).toMatch(/duration \d+ → \d+ min/);
+    expect(day18Log?.message).toMatch(/RPE \d+ → \d+/);
   });
 
   it("B) missed hard session is NOT crammed into next day", () => {
@@ -109,6 +117,42 @@ describe("adjustAfterMiss", () => {
 
     expect(day17StillHard).toBe(false);
     expect(result.decisionLog.length).toBeGreaterThan(0);
+
+    // Downgrade log should include previous→new RPE and duration
+    const downgradeLog = result.decisionLog.find(
+      (e) => e.rule === "miss_adjuster_hard_missed" && e.message.includes("2026-02-17"),
+    );
+    expect(downgradeLog).toBeDefined();
+    expect(downgradeLog?.message).toMatch(/RPE \d+ → \d+/);
+    expect(downgradeLog?.message).toMatch(/duration \d+ → \d+ min/);
+  });
+
+  it("D) fatigue with easy/moderate miss reduces next-day duration and logs old→new values", () => {
+    const plan: PlanDay[] = [
+      mkDay("2026-02-16", "easy", 2, 45, 4, "Easy Run"), // missed easy session
+      mkDay("2026-02-17", "moderate", 2, 60, 6, "Moderate Bike"),
+      { date: "2026-02-18", status: "planned" },
+      { date: "2026-02-19", status: "planned" },
+      { date: "2026-02-20", status: "planned" },
+      { date: "2026-02-21", status: "planned" },
+      { date: "2026-02-22", status: "planned" },
+    ];
+
+    const result = adjustAfterMiss(mkContext(), plan, {
+      dateISO: "2026-02-16",
+      kind: "missed",
+      reason: "fatigue",
+    });
+
+    const day17 = result.plan.find((d) => d.date === "2026-02-17");
+    expect(day17?.primary?.durationMinutes).toBeLessThan(60);
+
+    const fatigueLog = result.decisionLog.find((e) => e.rule === "miss_adjuster_fatigue");
+    expect(fatigueLog).toBeDefined();
+    // Message should say "from 60 to <reduced> min"
+    expect(fatigueLog?.message).toMatch(/from 60 to \d+ min/);
+    // Load before/after should appear
+    expect(fatigueLog?.message).toMatch(/load \d+ → \d+/);
   });
 
   it("C) does not mutate the original plan", () => {

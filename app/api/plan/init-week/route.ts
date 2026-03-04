@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getRuntime } from "../../../../lib/server/trainingRuntime";
 import { requireAuth } from "../../../../lib/server/requireAuth";
-import type { PlanContext } from "../../../../lib/training-engine/types";
+import { getUserSettingsOrDefault } from "../../../../lib/db/userSettings";
+import { toWeekStartISO } from "../../../../lib/training-engine/utils/weekStart";
+import type { PlanContext, FocusType, AthleteConstraints } from "../../../../lib/training-engine/types";
+import type { UserSettings } from "../../../../lib/api/types";
 
 // ── Leaf schemas ──────────────────────────────────────────────────────────────
 
@@ -104,26 +107,56 @@ const dailyReadinessSchema = z.object({
   injuryNotes: z.string().optional(),
 });
 
+// context is fully optional — missing fields are filled from user settings
 const contextSchema = z.object({
-  constraints: constraintsSchema,
-  // Default to zero-load history when caller omits the field.
-  history: historySchema.default({
-    last7DayLoad: 0,
-    last14DayLoad: 0,
-    completedSessions: [],
-  }),
-  // Default readiness to score 4 on today's date when caller omits the field.
-  readinessToday: dailyReadinessSchema.default(() => ({
-    date: new Date().toISOString().slice(0, 10),
-    readiness: 4 as const,
-  })),
+  constraints: constraintsSchema.optional(),
+  history: historySchema.optional(),
+  readinessToday: dailyReadinessSchema.optional(),
   existingPlan: z.array(planDaySchema).optional(),
 });
 
 const bodySchema = z.object({
   weekStartISO: z.string().min(1),
-  context: contextSchema,
+  context: contextSchema.optional(),
 });
+
+// ── Settings → constraints mapping ───────────────────────────────────────────
+
+const VALID_FOCUS = new Set<FocusType>([
+  "triathlon",
+  "hyrox",
+  "strength",
+  "half_marathon",
+  "general_fitness",
+]);
+
+function settingsToConstraints(settings: UserSettings): AthleteConstraints {
+  const focus: FocusType = VALID_FOCUS.has(settings.focus as FocusType)
+    ? (settings.focus as FocusType)
+    : "general_fitness";
+
+  // Distribute weekly budget evenly across all 7 days.
+  const daily = Math.round(settings.weeklyMinutes / 7);
+
+  return {
+    focus,
+    timeBudget: {
+      monday: daily,
+      tuesday: daily,
+      wednesday: daily,
+      thursday: daily,
+      friday: daily,
+      saturday: daily,
+      sunday: daily,
+    },
+    equipment: {
+      gym: settings.equipment.gym,
+      bikeTrainer: settings.equipment.trainer,
+      pool: settings.equipment.pool,
+      outdoorRun: settings.equipment.outdoorRun,
+    },
+  };
+}
 
 // ── Route handler ─────────────────────────────────────────────────────────────
 
@@ -146,17 +179,41 @@ export async function POST(request: Request): Promise<NextResponse> {
     );
   }
 
-  const { weekStartISO, context } = parsed.data;
+  let weekStartISO: string;
+  try {
+    weekStartISO = toWeekStartISO(parsed.data.weekStartISO);
+  } catch {
+    return NextResponse.json(
+      { ok: false, error: "weekStartISO is not a valid date" },
+      { status: 400 },
+    );
+  }
+  const bodyCtx = parsed.data.context;
 
   const auth = await requireAuth();
   if (auth instanceof NextResponse) return auth;
 
+  // Fetch persisted settings; body constraints override if provided.
+  const settings = await getUserSettingsOrDefault(auth.supabase);
+  const defaultConstraints = settingsToConstraints(settings);
+
+  const context: PlanContext = {
+    constraints: bodyCtx?.constraints ?? defaultConstraints,
+    history: bodyCtx?.history ?? {
+      last7DayLoad: 0,
+      last14DayLoad: 0,
+      completedSessions: [],
+    },
+    readinessToday: bodyCtx?.readinessToday ?? {
+      date: new Date().toISOString().slice(0, 10),
+      readiness: 4 as const,
+    },
+    existingPlan: bodyCtx?.existingPlan,
+  };
+
   try {
     const runtime = getRuntime(auth.supabase);
-    const snapshot = await runtime.initWeek(
-      context as unknown as PlanContext,
-      weekStartISO,
-    );
+    const snapshot = await runtime.initWeek(context, weekStartISO);
     return NextResponse.json({
       ok: true,
       weekStartISO: snapshot.weekStartISO,

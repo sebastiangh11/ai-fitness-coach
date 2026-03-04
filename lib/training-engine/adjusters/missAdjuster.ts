@@ -158,7 +158,8 @@ export function adjustAfterMiss(
         rule: "miss_adjuster_injury",
         message:
           `Day+2 "${prev.title}" on ${result[next2Idx].date} downgraded to easy ` +
-          `and duration reduced to ${adjusted.durationMinutes} min (injury carry-over).`,
+          `— duration ${prev.durationMinutes} → ${adjusted.durationMinutes} min, ` +
+          `RPE ${prev.targetRpe} → ${adjusted.targetRpe} (injury carry-over).`,
         severity: "info",
       });
     }
@@ -193,16 +194,18 @@ export function adjustAfterMiss(
             "warning"
           );
         } else {
+          const adjustedNext = recomputeSessionLoad(eased);
           result[nextIdx] = {
             ...result[nextIdx],
-            primary: recomputeSessionLoad(eased),
+            primary: adjustedNext,
             status: "modified",
           };
           log.push({
             rule: "miss_adjuster_hard_missed",
             message:
               `Next day "${nextSession.title}" on ${result[nextIdx].date} downgraded ` +
-              `from hard to easy` +
+              `from hard to easy — RPE ${nextSession.targetRpe} → ${adjustedNext.targetRpe}, ` +
+              `duration ${nextSession.durationMinutes} → ${adjustedNext.durationMinutes} min` +
               (isKey ? " (key session — priority 1)" : "") +
               `.`,
             severity: isKey ? "warning" : "info",
@@ -221,16 +224,19 @@ export function adjustAfterMiss(
 
       if (isHard(next2Session.intensity) && nextDayStillHard) {
         const isKey = next2Session.priority === 1;
+        const adjustedNext2 = downgradeToModerate(next2Session);
         result[next2Idx] = {
           ...result[next2Idx],
-          primary: downgradeToModerate(next2Session),
+          primary: adjustedNext2,
           status: "modified",
         };
         log.push({
           rule: "miss_adjuster_hard_missed",
           message:
             `Day+2 "${next2Session.title}" on ${result[next2Idx].date} downgraded ` +
-            `from hard to moderate to avoid back-to-back hard days` +
+            `from hard to moderate — RPE ${next2Session.targetRpe} → ${adjustedNext2.targetRpe}, ` +
+            `duration ${next2Session.durationMinutes} → ${adjustedNext2.durationMinutes} min ` +
+            `— to avoid back-to-back hard days` +
             (isKey ? " (key session — priority 1)" : "") +
             `.`,
           severity: isKey ? "warning" : "info",
@@ -256,8 +262,8 @@ export function adjustAfterMiss(
         rule: "miss_adjuster_fatigue",
         message:
           `${event.reason === "fatigue" ? "Fatigue" : "Time constraint"} noted — ` +
-          `"${prev.title}" on ${result[nextIdx].date} reduced by 15% ` +
-          `to ${adjusted.durationMinutes} min.`,
+          `"${prev.title}" on ${result[nextIdx].date} duration reduced from ${prev.durationMinutes} ` +
+          `to ${adjusted.durationMinutes} min (15% cut; load ${prev.load} → ${adjusted.load}).`,
         severity: "info",
       });
     }
@@ -283,31 +289,37 @@ export function adjustAfterMiss(
     if (next2Priority >= nextPriority) {
       // next2 is equal or lower priority — downgrade next2 to moderate
       const prev = result[next2Idx].primary!;
+      const adjustedNext2D = downgradeToModerate(prev);
       result[next2Idx] = {
         ...result[next2Idx],
-        primary: downgradeToModerate(prev),
+        primary: adjustedNext2D,
         status: "modified",
       };
       log.push({
         rule: "miss_adjuster_back_to_back",
         message:
           `Both day+1 and day+2 are hard. Downgraded lower-priority ` +
-          `"${prev.title}" on ${result[next2Idx].date} to moderate.`,
+          `"${prev.title}" on ${result[next2Idx].date} from hard to moderate ` +
+          `— RPE ${prev.targetRpe} → ${adjustedNext2D.targetRpe}, ` +
+          `duration ${prev.durationMinutes} → ${adjustedNext2D.durationMinutes} min.`,
         severity: "info",
       });
     } else {
       // next day is lower priority — downgrade next to easy
       const prev = result[nextIdx].primary!;
+      const adjustedNextD = recomputeSessionLoad(downgradeIntensityToEasy(prev));
       result[nextIdx] = {
         ...result[nextIdx],
-        primary: recomputeSessionLoad(downgradeIntensityToEasy(prev)),
+        primary: adjustedNextD,
         status: "modified",
       };
       log.push({
         rule: "miss_adjuster_back_to_back",
         message:
           `Both day+1 and day+2 are hard. Downgraded lower-priority ` +
-          `"${prev.title}" on ${result[nextIdx].date} to easy.`,
+          `"${prev.title}" on ${result[nextIdx].date} from hard to easy ` +
+          `— RPE ${prev.targetRpe} → ${adjustedNextD.targetRpe}, ` +
+          `duration ${prev.durationMinutes} → ${adjustedNextD.durationMinutes} min.`,
         severity: "info",
       });
     }
@@ -335,9 +347,10 @@ export function adjustAfterMiss(
       result[i].primary!.priority > result[worst].primary!.priority ? i : worst
     );
     const prev = result[toDowngradeIdx].primary!;
+    const adjustedHardCap = downgradeToModerate(prev);
     result[toDowngradeIdx] = {
       ...result[toDowngradeIdx],
-      primary: downgradeToModerate(prev),
+      primary: adjustedHardCap,
       status: "modified",
     };
     log.push({
@@ -345,7 +358,8 @@ export function adjustAfterMiss(
       message:
         `Hard session count in 3-day window (${hardInWindow.length}) exceeded cap of ${windowHardCap}. ` +
         `Downgraded lowest-priority "${prev.title}" on ${result[toDowngradeIdx].date} ` +
-        `from hard to moderate.`,
+        `from hard to moderate — RPE ${prev.targetRpe} → ${adjustedHardCap.targetRpe}, ` +
+        `duration ${prev.durationMinutes} → ${adjustedHardCap.durationMinutes} min.`,
       severity: "info",
     });
   }
